@@ -694,7 +694,7 @@ static int unlock_transaction_dma(struct unlock_transaction_work *work)
 	/* No launch precedes the first table entry, so the slots stay unused
 	 * until run_privileged_writes() builds the image for its write. */
 	{
-		int ret = gu_payload_build(work->payload, work->buffer.cpu, 0, 0);
+		int ret = gu_payload_build(work->payload, work->buffer.cpu, NULL, 0);
 
 		if (ret)
 			return GU_RESULT(ret);
@@ -1039,6 +1039,9 @@ static int unlock_transaction_boot(struct unlock_transaction_work *work)
 	    work->payload->completion == GU_PAYLOAD_HALT_RESET_PLM_ECHO)
 		cleanup_complete = mailbox0 == lower_32_bits(work->meta.dma) &&
 			mailbox1 == upper_32_bits(work->meta.dma);
+	if (cleanup_complete &&
+	    work->payload->completion == GU_PAYLOAD_HALT_RESET_PLM_MARKER)
+		cleanup_complete = mailbox0 == work->payload->marker;
 	dev_dbg(&work->pdev->dev,
 		 "invocation: index=%zu attempt=%u reset=%u/%u reload=%u start=%u cpuctl=%#x engine=%#x reset_plm@%#x=%#x mailbox=%#x:%#x acr=%#x csberr=%#x fhstate=%#x wpr2=%#x:%#x plm_feat=%#x plm_wpr_cfg=%#x fresh=%u cleanup_observed=%u result=%d\n",
 		 work->write_index, work->attempt, launch.reset_asserted,
@@ -1152,18 +1155,36 @@ static int table_failure(struct unlock_transaction_work *work, const char *phase
 static int run_privileged_writes(struct unlock_transaction_work *work,
 				 const struct gu_write_table *table)
 {
-	size_t i;
+	const size_t per_launch = work->payload->writes;
+	struct gu_reg_write batch[GU_PAYLOAD_MAX_WRITES];
+	size_t i, j, count;
 	u32 after = 0;
+	bool matched;
 	int ret;
+
 	if (work->state != GU_PUBLISHED && work->state != GU_ACTIVE)
 		return GU_RESULT(-EPROTO);
+	if (!table->count)
+		return 0;
 	work->state = GU_ACTIVE;
-	for (i = 0; i < table->count; i++) {
-		const struct gu_reg_write *entry = &table->entries[i];
+	for (i = 0; i < table->count; i += per_launch) {
+		const struct gu_reg_write *entry;
+
+		count = table->count - i;
+		if (count > per_launch)
+			count = per_launch;
+		/* Repeat the last write of this launch to fill the payload's fixed
+		 * slot count. The recipe's final write must therefore be the value
+		 * the chain's unused slots already produce. */
+		for (j = 0; j < per_launch; j++)
+			batch[j] = table->entries[i + (j < count ? j : count - 1)];
+		entry = &batch[0];
+		matched = false;
 		work->write_index = i;
 		for (work->attempt = 1; work->attempt <= 2; work->attempt++) {
 			u32 before, lo = 0, hi = 0, ctl = 0, engine = 0;
 			struct gu_boot_state st;
+
 			work->error_reported = false;
 			work->target_addr = entry->addr;
 			work->target_value = entry->value;
@@ -1192,54 +1213,78 @@ static int run_privileged_writes(struct unlock_transaction_work *work,
 			read_bar(work, GU_WPR2_ADDR_HI_OFFSET, &hi);
 			gu_read_boot_state(work, &st);
 			dev_dbg(&work->pdev->dev,
-				 "prelaunch: index=%zu/%zu attempt=%u target=%#x value=%#x before=%#x cpuctl=%#x engine=%#x reset_plm=%#x wpr2=%#x:%#x fhstate=%#x\n",
-				 i, table->count, work->attempt, entry->addr, entry->value,
+				 "prelaunch: index=%zu/%zu count=%zu attempt=%u target=%#x value=%#x before=%#x cpuctl=%#x engine=%#x reset_plm=%#x wpr2=%#x:%#x fhstate=%#x\n",
+				 i, table->count, count, work->attempt, entry->addr, entry->value,
 				 before, ctl, engine, st.reset_plm, lo, hi, st.fhstate);
-			ret = gu_payload_build(work->payload, work->buffer.cpu,
-					       entry->addr, entry->value);
+			ret = gu_payload_build(work->payload, work->buffer.cpu, batch,
+					       per_launch);
 			if (ret)
 				return table_failure(work, "payload", entry, after, ret);
 			put_le64((u8 *)work->meta.cpu + 72, work->buffer.dma);
 			put_le64((u8 *)work->meta.cpu + 80, work->payload->size);
 			dma_wmb();
 			dev_dbg(&work->pdev->dev,
-				 "payload: name=%s size=%#x dma=%#llx index=%zu/%zu attempt=%u address=%#x value=%#x mode=%s\n",
+				 "payload: name=%s size=%#x dma=%#llx index=%zu/%zu writes=%zu attempt=%u first=%#x:%#x mode=%s\n",
 				 work->payload->name, work->payload->size,
 				 (unsigned long long)work->buffer.dma, i, table->count,
-				 work->attempt, entry->addr, entry->value,
+				 count, work->attempt, entry->addr, entry->value,
 				 work->attempt > 1 ? "retry" : "first");
 			ret = unlock_transaction_boot(work);
-			if (read_bar(work, entry->addr, &after) ||
-			    (after & 0xffff0000u) == 0xbadf0000u ||
-			    read_bar(work, GU_WPR2_ADDR_LO_OFFSET, &lo) || read_bar(work, GU_WPR2_ADDR_HI_OFFSET, &hi))
+			if (ret)
+				return table_failure(work, "completion", entry, after, ret);
+			if (read_bar(work, GU_WPR2_ADDR_LO_OFFSET, &lo) ||
+			    read_bar(work, GU_WPR2_ADDR_HI_OFFSET, &hi))
 				return table_failure(work, "result-inaccessible", entry, after, -ENODEV);
 			gu_read_boot_state(work, &st);
-			dev_dbg(&work->pdev->dev,
-				 "write result: index=%zu/%zu attempt=%u address=%#x expected=%#x observed=%#x wpr2=%#x:%#x write=%u reset_plm=%#x ctl=%#x engine=%#x fhstate=%#x mbox=%#x:%#x acr=%#x csberr=%#x\n",
-				 i, table->count, work->attempt, entry->addr, entry->value,
-				 after, lo, hi, after == entry->value, st.reset_plm,
-				 st.ctl, st.engine, st.fhstate, st.mailbox1, st.mailbox0,
-				 st.acr, st.csberr);
-			if (ret) {
-				dev_err(&work->pdev->dev, "failed invocation WPR2: actual=%#x:%#x saved_FRTS=%#x:%#x\n",
-					lo, hi, work->frts_lo, work->frts_hi);
-				return table_failure(work, "completion", entry, after, ret);
-			}
-			if (after == entry->value) {
+			matched = true;
+			for (j = 0; j < count; j++) {
+				const struct gu_reg_write *written = &table->entries[i + j];
+				u32 expected = written->expect ? written->expect : written->value;
+				u32 observed = 0;
+
+				if (read_bar(work, written->addr, &observed) ||
+				    (observed & 0xffff0000u) == 0xbadf0000u) {
+					work->target_addr = written->addr;
+					work->target_value = written->value;
+					return table_failure(work, "result-inaccessible",
+							     written, observed, -ENODEV);
+				}
+				if (observed != expected) {
+					if (written->optional) {
+						dev_info(&work->pdev->dev,
+							 "gpu_unlock: optional write %zu/%zu target=%#x wrote=%#x expected=%#x observed=%#x\n",
+							 i + j + 1, table->count, written->addr,
+							 written->value, expected, observed);
+						continue;
+					}
+					matched = false;
+					after = observed;
+					work->target_addr = written->addr;
+					work->target_value = written->value;
+					table_failure(work, "readback", written, observed, -EIO);
+					continue;
+				}
 				dev_info(&work->pdev->dev,
 					 "gpu_unlock: pass=%zu/%zu attempt=%u target=%#x value=%#x before=%#x after=%#x wpr2=%#x:%#x reset_plm=%#x mbox=%#x:%#x ret=0\n",
-					 i + 1, table->count, work->attempt, entry->addr,
-					 entry->value, before, after, lo, hi,
+					 i + j + 1, table->count, work->attempt, written->addr,
+					 written->value, before, observed, lo, hi,
 					 st.reset_plm, st.mailbox1, st.mailbox0);
-				break;
 			}
+			dev_dbg(&work->pdev->dev,
+				 "write result: index=%zu/%zu count=%zu attempt=%u first=%#x expected=%#x observed=%#x wpr2=%#x:%#x write=%u reset_plm=%#x ctl=%#x engine=%#x fhstate=%#x mbox=%#x:%#x acr=%#x csberr=%#x\n",
+				 i, table->count, count, work->attempt, entry->addr, entry->value,
+				 after, lo, hi, matched, st.reset_plm,
+				 st.ctl, st.engine, st.fhstate, st.mailbox1, st.mailbox0,
+				 st.acr, st.csberr);
+			if (matched)
+				break;
 			/* Only literal idempotent PLMs belong here. A mismatching
 			 * readback after proven halt/cleanup may be retried once.
 			 * Errors/timeouts never replay an uncertain side effect. */
-			table_failure(work, "readback", entry, after, -EIO);
 		}
-		if (after != entry->value)
-			return table_failure(work, "readback-exhausted", entry, after, -EIO);
+		if (!matched)
+			return table_failure(work, "readback-exhausted",
+					     &table->entries[i + count - 1], after, -EIO);
 	}
 	ret = restore_frts(work);
 	return ret && table->count ?

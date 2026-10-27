@@ -16,7 +16,6 @@
 #define GU_FW_BOOT_AD102   "gpu-unlock/610.43.03/gsp_boot_ad102.bin"
 #define GU_FW_DESC_AD102   "gpu-unlock/610.43.03/gsp_boot_desc_ad102.bin"
 
-struct gu_reg_write { u32 addr, value; };
 struct gu_write_table { const struct gu_reg_write *entries; size_t count; };
 
 /* Header fields that differ between signed Booter images. The common checks

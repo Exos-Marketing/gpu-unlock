@@ -25,26 +25,76 @@ static const struct gu_payload_word ga102_v67_words[] = {
 	{ 0xf9e8, 0x00000d52 },
 	{ 0xf9ec, 0x000081ee },
 };
+static const struct gu_payload_slot ga102_v67_slots[] = {
+	{ 0xf948, 0xf960 },
+};
 #define GU_PAYLOAD_V67(label) {					\
 	.name = label,						\
 	.size = 0xfa00,						\
 	.fill = 0x0000019c,					\
-	.value_off = 0xf948,					\
-	.address_off = 0xf960,					\
+	.slots = ga102_v67_slots,				\
+	.writes = sizeof(ga102_v67_slots) / sizeof(ga102_v67_slots[0]), \
 	.words = ga102_v67_words,				\
 	.word_count = sizeof(ga102_v67_words) / sizeof(ga102_v67_words[0]), \
 	.completion = GU_PAYLOAD_HALT_RESET_PLM,		\
 }
 
 static const struct gu_payload ga102_v67 = GU_PAYLOAD_V67("ga102-v67");
-/* No payload has been derived for the GA100 or AD102 signed Booter yet; both
- * reuse the GA102 V67 body until one is. Replace the descriptor when it lands. */
+/* No payload has been derived for the GA100 signed Booter yet; it reuses the
+ * GA102 V67 body until one is. Replace the descriptor when it lands. */
 static const struct gu_payload ga100_v67 = GU_PAYLOAD_V67("ga100-v67");
-static const struct gu_payload ad102_v67 = GU_PAYLOAD_V67("ad102-v67");
 
-/* Same per-entry image as GA10x. These are the stores, in order. */
+/* AD102 four-PLM chain from TOTORONG/AD103_win_unlocker, also shipped by
+ * JustAResearcher/gpu-unlock-ada. One SEC2 start writes WPR_CFG, FBPA, WPR and
+ * FEAT in order, writes the completion marker, then runs the cleanup tail.
+ * The FBPA write is nonfatal on hardware and is not in the privileged table.
+ * The generated chain does not honour a value in the fourth slot (it writes
+ * 0xffffffff there), so the driver's repeat-to-fill rule must supply FEAT as
+ * the last write. */
+static const struct gu_payload_slot ad102_v67_slots[] = {
+	{ 0xf948, 0xf960 },
+	{ 0xf998, 0xf984 },
+	{ 0xf9bc, 0xf9a8 },
+	{ 0,      0xf9cc }, /* value is the chain's fixed 0xffffffff */
+};
+static const struct gu_payload_word ad102_v67_words[] = {
+	{ 0x1100, 0x00000007 },
+	{ 0xf950, 0x000021b2 },
+	{ 0xf968, 0x000033fc },
+	{ 0xf974, 0xffffffff },
+	{ 0xf97c, 0x0000256f },
+	{ 0xf980, 0x00007a02 },
+	{ 0xf98c, 0x000033fc },
+	{ 0xf9a0, 0x0000256f },
+	{ 0xf9a4, 0x00007a02 },
+	{ 0xf9b0, 0x000033fc },
+	{ 0xf9c4, 0x0000256f },
+	{ 0xf9c8, 0x00007a02 },
+	{ 0xf9d4, 0x000033fc },
+	{ 0xf9e0, 0x67b00001 },
+	{ 0xf9e8, 0x0000256f },
+	{ 0xf9ec, 0x00007a02 },
+	{ 0xf9f8, 0x000031b5 },
+	{ 0xf9fc, 0x0000771e },
+};
+static const struct gu_payload ad102_v67 = {
+	.name = "ad102-v67-four-plm",
+	.size = 0xfa00,
+	.fill = 0x0000019c,
+	.slots = ad102_v67_slots,
+	.writes = sizeof(ad102_v67_slots) / sizeof(ad102_v67_slots[0]),
+	.words = ad102_v67_words,
+	.word_count = sizeof(ad102_v67_words) / sizeof(ad102_v67_words[0]),
+	.completion = GU_PAYLOAD_HALT_RESET_PLM_MARKER,
+	.marker = 0x67b00001,
+};
+
+/* Same per-entry image as GA10x. These are the stores, in order. The FBPA
+ * store is attempted by the signed chain but hardware leaves the field at its
+ * pre-existing value, so it is optional for the readback gate. */
 static const struct gu_reg_write ad102_plm[] = {
 	{ GU_WPR_CFG_PLM_OFFSET,	0xfffff0ff },
+	{ GU_FBPA_PLM_OFFSET,		0xffffffff, 0xffffff0f, true },
 	{ GU_WPR_PLM_OFFSET, 		0xffffffff },
 	{ GU_FEAT_PLM_OFFSET, 		0xffffffff },
 };
@@ -164,8 +214,8 @@ static const struct gu_family ga10x = {
 	.loader = NULL,
 	.fwsec_version = 3,
 };
-static const struct gu_family ad102 = {
-	.name = "AD102",
+static const struct gu_family ad10x = {
+	.name = "AD102/AD103/AD104/AD106/AD107",
 	.privileged = GU_WRITE_TABLE(ad102_plm),
 	.host = GU_WRITE_TABLE(selectors),
 	.fw = &ad102_fw,
@@ -174,7 +224,11 @@ static const struct gu_family ad102 = {
 	.fwsec_version = 3,
 };
 
-#define AD102(id) { id, 0x192, &ad102 }
+#define AD102(id) { id, 0x192, &ad10x }
+#define AD103(id) { id, 0x193, &ad10x }
+#define AD104(id) { id, 0x194, &ad10x }
+#define AD106(id) { id, 0x196, &ad10x }
+#define AD107(id) { id, 0x197, &ad10x }
 
 #define GA100(id) { id, 0x170, &ga100 }
 #define GA102(id) { id, 0x172, &ga10x }
@@ -183,6 +237,23 @@ static const struct gu_family ad102 = {
 #define GA106(id) { id, 0x176, &ga10x }
 
 static const struct gu_card cards[] = {
+	/* AD102: RTX 4090, RTX 4090 D, RTX 4070 Ti SUPER */
+	AD102(0x2684), AD102(0x2685), AD102(0x2689),
+
+	/* AD103: RTX 4080 SUPER, RTX 4080, RTX 4070 Ti SUPER, RTX 4070,
+	 * RTX 4090 Laptop */
+	AD103(0x2702), AD103(0x2704), AD103(0x2705), AD103(0x2709),
+	AD103(0x2757),
+
+	/* AD104: RTX 4070 Ti, RTX 4070 SUPER, RTX 4070 */
+	AD104(0x2782), AD104(0x2783), AD104(0x2786),
+
+	/* AD106: RTX 4060 Ti, RTX 4060 Ti 16GB */
+	AD106(0x2803), AD106(0x2805),
+
+	/* AD107: RTX 4060, RTX 4060 Laptop, RTX 4060 Mobile, RTX 4050 Mobile */
+	AD107(0x2882), AD107(0x28a0), AD107(0x28e0), AD107(0x28e1),
+
 	GA102(0x2200), GA102(0x2203), GA102(0x2204), GA102(0x2205),
 	GA102(0x2206), GA102(0x2207), GA102(0x2208), GA102(0x220a),
 	GA102(0x220d), GA102(0x2216), GA102(0x222b), GA102(0x222f),
