@@ -1,3 +1,33 @@
+# GPU Unlock em português: a sua GeForce RTX rodando IA na velocidade total
+
+> **Cópia mantida pela [Exos Marketing](https://www.instagram.com/exosmkt/).** O GPU Unlock foi criado por **[Zagitta](https://github.com/Zagitta)** e está aqui sob a licença GPL-2.0, sem alteração no código. Repositório original (sempre a versão mais nova): [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock).
+
+## O que ele faz
+
+As GeForce RTX das séries 20, 30 e 40 saem de fábrica com os núcleos de IA (tensor cores) limitados à metade da velocidade em FP16, BF16 e TF32, que é a conta usada em quase todo treino e geração de IA. O mesmo chip, vendido como placa profissional, roda sem esse limite. O GPU Unlock tira a trava no boot, antes de o driver oficial da NVIDIA carregar: **sem mexer na BIOS da placa e sem driver modificado**.
+
+**Quanto ganha:** em multiplicação de matrizes, de +65% a +100% conforme a placa (RTX 3090 Ti: 88 → 157 TFLOPS, +80%). Em uso real: +30 a 55% em geração de imagem, +25 a 50% em fine-tuning, +25 a 55% no processamento do prompt de LLMs. **Em jogo não muda nada**, nem em modelos quantizados (INT8/FP8/INT4).
+
+**Placas:** série 30 estável; séries 40 e 20 em fase experimental; série 50 não é suportada.
+
+## Instalação (Linux)
+
+```sh
+git clone https://github.com/Zagitta/gpu-unlock
+cd gpu-unlock
+make install
+```
+
+Depois acrescente `gpu_unlock.targets=all` na linha de comando do kernel (no GRUB: dentro de `GRUB_CMDLINE_LINUX_DEFAULT`, em `/etc/default/grub`, e rode `sudo update-grub`). Os outros carregadores de boot estão explicados em inglês logo abaixo. Para desfazer, basta tirar essa opção.
+
+**Windows:** não há versão oficial. Existe uma adaptação feita pela comunidade, testada sobretudo na RTX 3090: [impacifist/Windows-GPU-UNLOCK](https://github.com/impacifist/Windows-GPU-UNLOCK).
+
+**Cuidado com golpe:** o próprio autor avisa que não tem site, moeda nem instalador. Instalador "pronto" circulando por aí não é dele; baixe só dos repositórios acima.
+
+**Por sua conta e risco:** segundo o autor, é muito improvável danificar a placa (o controle de temperatura e de energia continua igual), mas a placa pode esquentar um pouco mais porque passa a trabalhar mais. É um projeto independente, sem relação com a NVIDIA.
+
+---
+
 ![gpu-unlock: full-speed tensor cores for GeForce RTX](assets/banner.svg)
 
 ### Your GeForce runs AI at half speed. This fixes it.
